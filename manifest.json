@@ -1,0 +1,9 @@
+{
+    "name": "Evilmando",
+    "version_number": "1.0.0",
+    "website_url": "https://github.com/RandomCatDude/RandomCatDude-Evilmando",
+    "description": "we have nemesis commando at home",
+    "dependencies": [
+		"ReturnOfModding-ReturnOfModding-1.0.34"
+	]
+}
