@@ -232,6 +232,7 @@ gm.post_script_hook(gm.constants.__input_system_tick, function(self, other, resu
 	-- load evilmando's name and subtitle
 	gm.translate_load_file(gm.variable_global_get("_language_map"), _ENV["!plugins_mod_folder_path"].."/english.json")
 
+	-- language map gets cleared when changing languaes, so reload it here.
 	gm.post_script_hook(gm.constants.translate_load_file, function(self, other, result, args)
 		if loadlang then return end -- do a bit of sanity checking to ensure we don't get stuck in a loop
 
