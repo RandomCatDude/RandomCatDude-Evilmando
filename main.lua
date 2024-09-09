@@ -1,43 +1,119 @@
--- array of arrays detailing custom object data.
-local custom_object = gm.variable_global_get("custom_object")
--- indexed by custom object id minus 800, then the array within can be indexed following this enum: (courtesy of sarn)
--- (add one to these indices if you're using lua-style indexing, of course)
---
--- enum KEY_CUSTOM_OBJECT {
---     base = 0,
---     obj_depth = 1,
---     obj_sprite = 2,
---     identifier = 3,
---     namespace = 4,
---
---     on_create = 5,
---     on_destroy = 6,
---     on_step = 7,
---     on_draw = 8
--- }
+local callbacks = {}
 
--- wrapping it this way avoids duplicating stuff when hotloading. relies on global vars persisting through hotloads.
-if not evilmando_obj_id then
-	-- create custom object. this returns a fake object id, which gets resolved by the game's many functions that handle these custom objects
-	-- look for _w suffixed object_ functions, and _mod_ prefixed versions of functions like instance_nearest.
-	-- instance_create also exists to handle these object ids.
-	evilmando_obj_id = gm.object_add_w("kitty", "Evilmando", gm.constants.pEnemyClassic)
-end
-evilmando_obj_array		= custom_object[evilmando_obj_id - 799] -- custom obj ids start at 800, subtracts by 799 here because of lua 1-based indexing
--- callbacks. these can be intercepted in callback_execute
--- i only use the init hook, but the others are provided for completion/experimentation
-evilmando_obj_init		= evilmando_obj_array[6] -- on_create
-evilmando_obj_destroy	= evilmando_obj_array[7] -- on_destroy
-evilmando_obj_step		= evilmando_obj_array[8] -- on_step
-evilmando_obj_draw		= evilmando_obj_array[9] -- on_draw
+-- pretty standard callback handler
+gm.pre_script_hook(gm.constants.callback_execute, function(self, other, result, args)
+	if callbacks[args[1].value] then
+		callbacks[args[1].value](self, other, result, args)
+		return false
+	end
+end)
 
--- for some reason writing to the array with lua syntax throws an error idk why, so i use array_set here. note this makes the indexing 0-based
--- set "obj_sprite", which is used to show your killer in the defeat screen. this is VERY IMPORTANT for custom enemies as otherwise they will be unable to deal damage to you and cause many errors.
-gm.array_set(evilmando_obj_array, 2, gm.constants.sCommandoIdle) -- obj_sprite
+-- i am sorry in advance for how much i rawdog the game's functions and data structures. hopefully it's reasonably readable
+-- for actual serious mods you would want to use the RoRR Modding Toolkit and the wrappers it offers.
+function evilmando_setup()
+	-- global arrays of arrays that have important info in them
+	local skills = gm.variable_global_get("class_skill")
+	local states = gm.variable_global_get("class_actor_state")
 
-local callbacks = {
+	-- create skill and actor state for evilmando's primary. save their IDs for use down below
+	-- wrapping stuff this way avoids duplicating stuff when hotloading. relies on global vars persisting through hotloads.
+	if not evil_z_skill then
+		evil_z_skill = gm.skill_create("kitty", "EvilmandoZ")
+	end
+	if not evil_z_state then
+		evil_z_state = gm.actor_state_create("kitty", "EvilmandoZ")
+	end
+
+	-- fetch the array containing actual skill info
+	local evil_z_skill_arr = skills[evil_z_skill+1]
+
+	gm.array_set(evil_z_skill_arr, 6, 4)			-- cooldown in frames
+	gm.array_set(evil_z_skill_arr, 17, true)		-- is_primary; removes 0.5s minimum cooldown limit, hides cooldown on survivor HUDs
+	local evil_z_callback = evil_z_skill_arr[26]	-- on_activate callback
+
+	-- fetch the callback ids of our newly created actor state for use down below
+	local evil_z_state_arr		= states[evil_z_state+1]
+	local evil_z_state_enter	= evil_z_state_arr[3]
+	local evil_z_state_exit		= evil_z_state_arr[4]
+	local evil_z_state_step		= evil_z_state_arr[5]
+
+	callbacks[evil_z_callback] = function(self, other, result, args)
+		gm.actor_set_state_networked(self, evil_z_state)
+    end
+    callbacks[evil_z_state_enter] = function(self, other, result, args)
+		local data = args[2] -- the state system provides this struct to conveniently store variables
+		gm.struct_set(data, "shots", 0)
+
+		-- play animation
+		self.sprite_index = gm.constants.sCommandoShoot1
+		self.image_index = 0
+		self.image_speed = 0.2 * self.attack_speed
+    end
+    callbacks[evil_z_state_step] = function(self, other, result, args)
+		local data = args[2]
+		self:skill_util_fix_hspeed() -- handles stopping horizontal movement if on floor
+
+		local shots = gm.struct_get(data, "shots")
+
+		-- ror1-style double tap, since the animation is naturally setup for it
+		if (shots == 0) or (self.image_index >= 2 and shots == 1) then
+			self:sound_play(gm.constants.wBullet1, 1, 1)
+
+			-- fire_bullet automatically networks itself. you don't wanna run it on more than one client'
+			-- if this skill were to be used by a player, makes it so the player's client has authority over its damage
+			if self.local_client_is_authority then
+				local b = gm._mod_attack_fire_bullet(self, self.x, self.y, 1400, gm.actor_get_facing_direction(self), 0.6, gm.constants.sSparks1, false, true)
+				b.attack_info.tracer_kind = 8
+			end
+
+			shots = shots + 1
+			gm.struct_set(data, "shots", shots)
+		end
+
+		-- automatically exits state once the animation is done.
+		-- apparently this exits slightly early to match ror1 timings
+		-- you might have to add an extra idle frame at the end to account for that
+		self:skill_util_exit_state_on_anim_end()
+	end
+
+	-- array of arrays detailing custom object data.
+	local custom_object = gm.variable_global_get("custom_object")
+	-- indexed by custom object id minus 800, then the array within can be indexed following this enum: (courtesy of sarn)
+	-- (add one to these indices if you're using lua-style indexing, of course)
+	--
+	-- enum KEY_CUSTOM_OBJECT {
+	--     base = 0,
+	--     obj_depth = 1,
+	--     obj_sprite = 2,
+	--     identifier = 3,
+	--     namespace = 4,
+	--
+	--     on_create = 5,
+	--     on_destroy = 6,
+	--     on_step = 7,
+	--     on_draw = 8
+	-- }
+
+	if not evilmando_obj_id then
+		-- create custom object. this returns a fake object id, which gets resolved by the game's many functions that handle these custom objects
+		-- look for _w suffixed object_ functions, and _mod_ prefixed versions of functions like instance_nearest.
+		-- instance_create also exists to handle these object ids.
+		evilmando_obj_id = gm.object_add_w("kitty", "Evilmando", gm.constants.pEnemyClassic)
+	end
+	evilmando_obj_array		= custom_object[evilmando_obj_id - 799] -- custom obj ids start at 800, subtracts by 799 here because of lua 1-based indexing
+	-- callbacks. these can be intercepted in callback_execute
+	-- i only use the init hook, but the others are provided for completion/experimentation
+	evilmando_obj_init		= evilmando_obj_array[6] -- on_create
+	evilmando_obj_destroy	= evilmando_obj_array[7] -- on_destroy
+	evilmando_obj_step		= evilmando_obj_array[8] -- on_step
+	evilmando_obj_draw		= evilmando_obj_array[9] -- on_draw
+
+	-- for some reason writing to the array with lua syntax throws an error idk why, so i use array_set here. note this makes the indexing 0-based
+	-- set "obj_sprite", which is used to show your killer in the defeat screen. this is VERY IMPORTANT for custom enemies as otherwise they will be unable to deal damage to you and cause many errors.
+	gm.array_set(evilmando_obj_array, 2, gm.constants.sCommandoIdle) -- obj_sprite
+
 	-- this init code is directly based on the imp init code that dee provided in the rorr modding disc.
-    [evilmando_obj_init] = function(self, other, result, args)
+	callbacks[evilmando_obj_init] = function(self, other, result, args)
 		-- setup sprites.
 		-- im not sure if player palettes are intended to be used this way.
 		-- evilmando interacts incorrectly with elite effect displays, using a player skin depending on the elite affix
@@ -74,58 +150,38 @@ local callbacks = {
 		-- z/x/c/v_range variables tell the ai the distance it can be from its target to use the skill.
 		-- use small values for melee skills, and higher values for ranged skills. a lemurian's z_range is 68.
 		--
-		-- evilmando uses commando's skills for simplicity.
-		-- he doesn't have commando's primary because skills that use strafing or half sprites are broken when used by enemies, so i have opted to instead make his primary Full Metal Jacket
-		self.z_range = 1500
+		-- evilmando uses a custom primary skill because strafing skills are kind of broken when used by enemies/non-players.
+		self.z_range = 1400
 		-- actor_skill_set takes the actor instance id, skill slot, and skill id.
-		gm.actor_skill_set(self.id, 0, 2) -- 0: primary skill slot, 2: commando FMJ
+		gm.actor_skill_set(self.id, 0, evil_z_skill) -- 0: primary skill slot, evilmando Z
 
-		self.x_range = 100
-		gm.actor_skill_set(self.id, 1, 6) -- 1: secondary skill slot, 6: commando knife
-		-- randomise if he gets the roll or slide
-		if math.random() > 0.2 then
+		-- use starting x position to randomise loadout between standard or alt mando
+		if math.fmod(self.x, 4) > 1.0 then
+			self.x_range = 1000
+			gm.actor_skill_set(self.id, 1, 2) -- 1: secondary skill slot, 2: commando FMJ
 			self.c_range = 200
 			gm.actor_skill_set(self.id, 2, 3) -- 2: utility skill slot, 3: commando roll
-		else
-			self.c_range = 900
-			gm.actor_skill_set(self.id, 2, 7) -- 2: utility skill slot, 7: commando slide
-		end
-		-- randomise if he gets the suppressive fire or shotgun
-		if math.random() > 0.5 then
-			self.v_range = 700
+			self.v_range = 300
 			gm.actor_skill_set(self.id, 3, 4) -- 3: special skill slot, 4: commando suppressive fire
 		else
+			self.x_range = 100
+			gm.actor_skill_set(self.id, 1, 6) -- 1: secondary skill slot, 2: commando knife
+			self.c_range = 500
+			gm.actor_skill_set(self.id, 2, 7) -- 2: utility skill slot, 7: commando slide
 			self.v_range = 72
 			gm.actor_skill_set(self.id, 3, 8) -- 3: special skill slot, 8: commando shotgun
 		end
 
 		-- no idea what this does but you should include it at the end of your enemy init code. some mods depend on it to modify newly spawned actors.
 		self:init_actor_late()
-    end,
-    -- these callbacks aren't used by evilmando, but here they are if you wanna do something with them
-    --[evilmando_obj_step] = function(self, other, result, args)
-    --end,
-    --[evilmando_obj_destroy] = function(self, other, result, args)
-    --end,
-    --[evilmando_obj_draw] = function(self, other, result, args)
-    --end,
-}
-
--- uses the above table to actually run the custom code.
-gm.pre_script_hook(gm.constants.callback_execute, function(self, other, result, args)
-	if callbacks[args[1].value] then
-		callbacks[args[1].value](self, other, result, args)
-		return false
 	end
-end)
-
-
-local evilmando_setup = false
-
--- this is where setup is done for evilmando to actually appear and work in-game
-gm.post_script_hook(gm.constants.__input_system_tick, function(self, other, result, args)
-	if evilmando_setup then return end
-	evilmando_setup = true
+	-- these callbacks aren't used by evilmando, but here they are if you wanna do something with them
+	--callbacks[evilmando_obj_step] = function(self, other, result, args)
+	--end,
+	--callbacks[evilmando_obj_destroy] = function(self, other, result, args)
+	--end,
+	--callbacks[evilmando_obj_draw] = function(self, other, result, args)
+	--end,
 
 	-- setup evilmando's monster spawn card
 	local monster_cards = gm.variable_global_get("class_monster_card")
@@ -161,12 +217,32 @@ gm.post_script_hook(gm.constants.__input_system_tick, function(self, other, resu
 			gm.ds_list_add(list, evilmando_card)
 		end
 	end
+end
+
+local inited = false
+local loadlang = false
+
+-- init code
+gm.post_script_hook(gm.constants.__input_system_tick, function(self, other, result, args)
+	if inited then return end
+	inited= true
+
+	evilmando_setup()
 
 	-- load evilmando's name and subtitle
 	gm.translate_load_file(gm.variable_global_get("_language_map"), _ENV["!plugins_mod_folder_path"].."/english.json")
 
+	gm.post_script_hook(gm.constants.translate_load_file, function(self, other, result, args)
+		if loadlang then return end -- do a bit of sanity checking to ensure we don't get stuck in a loop
+
+		loadlang = true
+		gm.translate_load_file(gm.variable_global_get("_language_map"), _ENV["!plugins_mod_folder_path"].."/english.json")
+		loadlang = false
+	end)
+
 	print("Evilmando is coming..")
 end)
+
 
 local funny_mode = false
 
